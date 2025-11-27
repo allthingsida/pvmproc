@@ -1,0 +1,115 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            loader_ext: so
+            proc_ext: so
+            platform: linux-x86_64
+          - os: macos
+            runner: macos-latest
+            loader_ext: dylib
+            proc_ext: dylib
+            platform: macos-aarch64
+          - os: windows
+            runner: windows-latest
+            loader_ext: dll
+            proc_ext: dll
+            platform: windows-x86_64
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk/src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/HexRaysSA/ida-sdk ida-sdk
+          git clone --depth 1 https://github.com/allthingsida/ida-cmake.git "${IDASDK}/ida-cmake"
+
+      - name: Configure
+        shell: bash
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          # Copy loader
+          find "${IDASDK}/bin/loaders" -name "catbert_ldr.${{ matrix.loader_ext }}" -exec cp {} dist/ \; 2>/dev/null || \
+          find build -name "catbert_ldr.${{ matrix.loader_ext }}" -exec cp {} dist/ \;
+          # Copy processor module
+          find "${IDASDK}/bin/procs" -name "pigletvm_proc.${{ matrix.proc_ext }}" -exec cp {} dist/ \; 2>/dev/null || \
+          find build -name "pigletvm_proc.${{ matrix.proc_ext }}" -exec cp {} dist/ \;
+          # Copy docs
+          [ -f README.md ] && cp README.md dist/
+          [ -f LICENSE ] && cp LICENSE dist/
+
+      - name: Create archive
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            7z a ../pvmproc-${{ matrix.platform }}.zip *
+          else
+            zip -r ../pvmproc-${{ matrix.platform }}.zip *
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvmproc-${{ matrix.platform }}
+          path: pvmproc-${{ matrix.platform }}.zip
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          files: artifacts/**/*.zip
+          generate_release_notes: true
